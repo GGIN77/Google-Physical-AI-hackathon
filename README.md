@@ -439,7 +439,6 @@ Potential future improvements include:
 
 This project is currently shared as a prototype and can be adapted for educational, experimental, or local event use.
 
-> For a final version, add the exact license you intend to publish under, such as MIT or Apache 2.0.
 
 ---
 
