@@ -5,327 +5,1531 @@ import threading
 import time
 from collections import deque
 
-# pip install ollama
-# Also run once in a terminal before starting this script:
+# ============================================================
+# INSTALL REQUIRED PACKAGES
+# ============================================================
+# pip install opencv-python ollama flask numpy
+#
+# Also run:
 #   ollama pull gemma3:4b
+# ============================================================
+
 import ollama
+from flask import Flask, Response, jsonify
 
-# ==============================
+
+# ============================================================
 # ESP32-CAM SETTINGS
-# ==============================
+# ============================================================
 
-url = "http://10.25.172.137/cam-lo.jpg"
+ESP32_CAM_URL = "http://10.25.172.137/cam-lo.jpg"
 
-# ==============================
+
+# ============================================================
+# WEB SERVER SETTINGS
+# ============================================================
+
+WEB_HOST = "0.0.0.0"
+WEB_PORT = 5000
+
+
+# ============================================================
 # GEMMA VERIFICATION SETTINGS
-# ==============================
+# ============================================================
 
-# Vision-capable Gemma model. gemma3:4b (or 12b/27b if your PC can
-# handle it) supports image input. Must be pulled via `ollama pull`
-# before running this script.
 GEMMA_MODEL = "gemma3:4b"
 
 VERIFY_PROMPT = (
-    "Look at this image carefully. Answer with only one word, "
-    "YES or NO: Does this image show a yellow object that has "
-    "fallen or is in the middle of falling (not resting stable "
-    "in its normal position)?"
+    "Look carefully at this image. A lemon may have just fallen. "
+    "Respond in exactly two lines:\n"
+    "Line 1: YES or NO - does this image show a lemon that has "
+    "fallen or is currently falling downward?\n"
+    "Line 2: One short sentence explaining what you see."
 )
 
-# ==============================
-# YELLOW COLOR DETECTION SETTINGS
-# ==============================
 
-LOWER_YELLOW = np.array([20, 90, 90])
-UPPER_YELLOW = np.array([35, 255, 255])
+# ============================================================
+# YELLOW BALL DETECTION SETTINGS
+# ============================================================
+
+# HSV range for yellow
+LOWER_YELLOW = np.array([20, 100, 100])
+UPPER_YELLOW = np.array([40, 255, 255])
+
+# Ignore objects that are too small or too large
 MIN_CONTOUR_AREA = 150
-MAX_CONTOUR_AREA = 15000
-MIN_CIRCULARITY = 0.4  # lower this further (even to 0) if your object isn't round
+MAX_CONTOUR_AREA = 30000
+
+# Ball should be reasonably circular
+MIN_CIRCULARITY = 0.55
+
+# Process at this width for better performance
 PROCESS_WIDTH = 320
 
-# ==============================
-# FALL DETECTION SETTINGS
-# ==============================
 
+# ============================================================
+# FALL DETECTION SETTINGS
+# ============================================================
+
+# Horizontal line the ball must cross while moving down
 FALL_LINE = 180
-POSITION_HISTORY = 8
-HISTORY_WINDOW_SECONDS = 0.4
+
+# Number of ball positions to remember
+POSITION_HISTORY = 10
+
+# Time window used for velocity calculation
+HISTORY_WINDOW_SECONDS = 0.5
+
+# Minimum downward velocity for suspected fall
 FALL_VELOCITY_THRESHOLD = 250
-FALL_COOLDOWN_SECONDS = 1.5
+
+# How long to show BALL DROPPED
+FALL_COOLDOWN_SECONDS = 2.0
+
+# Position smoothing
 EMA_ALPHA = 0.6
 
+# How long the ball can be missing before considering it gone
+OUT_OF_FRAME_GRACE_SECONDS = 0.8
+
+
+# ============================================================
+# TRACKING VARIABLES
+# ============================================================
+
 y_history = deque(maxlen=POSITION_HISTORY)
+
 smoothed_y = None
-fall_detected = False       # confirmed by Gemma
+
+fall_detected = False
 fall_time = 0
 
-# --------------------------
-# Gemma verification state
-# --------------------------
-# Verification runs in its own thread so a slow model call never
-# blocks frame capture or on-screen tracking. Only one verification
-# runs at a time - "verifying" gates new suspicions until it resolves.
-verifying = False
-verify_result = None   # None = pending, True/False = resolved
+last_seen_time = 0
 
+ball_seen_before = False
+
+
+# ============================================================
+# GEMMA VERIFICATION STATE
+# ============================================================
+
+verifying = False
+
+verify_result = None
+
+gemma_commentary = ""
+
+
+# ============================================================
+# SHARED WEB STATE
+# ============================================================
+
+web_lock = threading.Lock()
+
+latest_jpeg = None
+
+latest_status = {
+    "state": "starting",
+    "velocity": 0,
+    "commentary": "",
+    "updated_at": 0
+}
+
+
+# ============================================================
+# GEMMA VERIFICATION
+# ============================================================
 
 def verify_with_gemma(frame_bgr):
-    """Runs in a background thread. Sends the frame to Gemma via
-    Ollama and stores the yes/no verdict in verify_result."""
+
     global verify_result
+    global gemma_commentary
 
     try:
-        ok, buf = cv2.imencode(".jpg", frame_bgr)
+
+        print("Sending image to Gemma...")
+
+        ok, buffer = cv2.imencode(".jpg", frame_bgr)
+
         if not ok:
+
             verify_result = False
+
+            gemma_commentary = (
+                "Could not encode image for verification."
+            )
+
             return
 
+
         response = ollama.chat(
+
             model=GEMMA_MODEL,
+
             messages=[{
+
                 "role": "user",
+
                 "content": VERIFY_PROMPT,
-                "images": [buf.tobytes()],
-            }],
+
+                "images": [buffer.tobytes()]
+
+            }]
+
         )
 
-        answer = response["message"]["content"].strip().upper()
-        print(f"Gemma says: {answer}")
-        verify_result = answer.startswith("YES")
+
+        raw = response["message"]["content"].strip()
+
+        print("\nGemma Response:")
+        print(raw)
+        print()
+
+
+        lines = [
+
+            line.strip()
+
+            for line in raw.splitlines()
+
+            if line.strip()
+
+        ]
+
+
+        verdict_line = (
+
+            lines[0].upper()
+
+            if lines
+
+            else ""
+
+        )
+
+
+        commentary_line = (
+
+            lines[1]
+
+            if len(lines) > 1
+
+            else raw
+
+        )
+
+
+        verify_result = verdict_line.startswith("YES")
+
+        gemma_commentary = commentary_line
+
 
     except Exception as e:
-        print("Gemma verification error:", e)
-        # Fail open: if Gemma/Ollama isn't reachable, fall back to
-        # trusting the color+motion detector rather than silently
-        # dropping every fall.
+
+        print("Gemma error:", e)
+
+        # If Gemma fails, trust motion detection
         verify_result = True
 
+        gemma_commentary = (
+            "AI unavailable - fall confirmed by motion detection."
+        )
 
-# ==============================
-# BACKGROUND FRAME FETCHER
-# ==============================
+
+# ============================================================
+# BACKGROUND ESP32-CAM FRAME GRABBER
+# ============================================================
 
 class FrameGrabber:
 
-    def __init__(self, url):
-        self.url = url
+    def __init__(self, camera_url):
+
+        self.url = camera_url
+
         self.frame = None
+
         self.lock = threading.Lock()
+
         self.running = True
-        self.thread = threading.Thread(target=self._update, daemon=True)
+
+        self.thread = threading.Thread(
+            target=self._update,
+            daemon=True
+        )
+
         self.thread.start()
 
+
     def _update(self):
+
         while self.running:
+
             try:
-                response = urllib.request.urlopen(self.url, timeout=3)
+
+                response = urllib.request.urlopen(
+                    self.url,
+                    timeout=3
+                )
+
                 data = response.read()
-                im = cv2.imdecode(
-                    np.frombuffer(data, dtype=np.uint8),
+
+                image = cv2.imdecode(
+                    np.frombuffer(
+                        data,
+                        dtype=np.uint8
+                    ),
                     cv2.IMREAD_COLOR
                 )
-                if im is not None:
+
+                if image is not None:
+
                     with self.lock:
-                        self.frame = im
+
+                        self.frame = image
+
+
             except Exception as e:
-                print("Fetch error:", e)
+
+                print("ESP32-CAM error:", e)
+
                 time.sleep(0.2)
 
+
     def get_frame(self):
+
         with self.lock:
-            return None if self.frame is None else self.frame.copy()
+
+            if self.frame is None:
+
+                return None
+
+            return self.frame.copy()
+
 
     def stop(self):
+
         self.running = False
 
 
-print("Starting real-time yellow object tracker...")
-grabber = FrameGrabber(url)
+# ============================================================
+# FLASK WEB APP
+# ============================================================
 
-while grabber.get_frame() is None:
-    time.sleep(0.02)
-
-fps_counter = 0
-fps_timer = time.time()
-fps_display = 0
+app = Flask(__name__)
 
 
-# ==============================
-# MAIN LOOP
-# ==============================
+PAGE_HTML = """
+<!DOCTYPE html>
 
-try:
+<html>
 
-    while True:
+<head>
 
-        raw_frame = grabber.get_frame()
-        if raw_frame is None:
-            continue
+<meta charset="utf-8">
 
-        now = time.time()
+<title>Lemon Detector</title>
 
-        if PROCESS_WIDTH is not None:
-            scale = PROCESS_WIDTH / raw_frame.shape[1]
-            im = cv2.resize(raw_frame, (PROCESS_WIDTH, int(raw_frame.shape[0] * scale)))
-        else:
-            im = raw_frame.copy()
+<style>
 
-        height, width = im.shape[:2]
+body {
+    background: #111;
+    color: white;
+    font-family: Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 25px;
+}
 
-        # --------------------------
-        # Detect yellow, shape-filtered
-        # --------------------------
+h1 {
+    margin-bottom: 5px;
+}
 
-        blurred = cv2.GaussianBlur(im, (5, 5), 0)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, LOWER_YELLOW, UPPER_YELLOW)
-        mask = cv2.erode(mask, None, iterations=1)
-        mask = cv2.dilate(mask, None, iterations=2)
+#status {
+    font-size: 1.5em;
+    font-weight: bold;
+    padding: 12px 25px;
+    border-radius: 10px;
+    margin: 15px;
+}
 
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+.stable {
+    background: #1e3d1e;
+    color: #7CFC00;
+}
 
-        best_contour = None
-        best_area = 0
+.moving {
+    background: #4d3d00;
+    color: #ffd24d;
+}
 
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < MIN_CONTOUR_AREA or area > MAX_CONTOUR_AREA:
+.verifying {
+    background: #3a2a00;
+    color: orange;
+}
+
+.eliminated {
+    background: #4d0000;
+    color: #ff5555;
+}
+
+.starting {
+    background: #333;
+    color: white;
+}
+
+#frame {
+    max-width: 800px;
+    width: 100%;
+    border: 3px solid #444;
+    border-radius: 10px;
+}
+
+#velocity {
+    margin-top: 10px;
+    color: #aaa;
+}
+
+#commentary {
+    max-width: 800px;
+    margin-top: 15px;
+    color: #ddd;
+    font-size: 1.1em;
+    font-style: italic;
+    text-align: center;
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+<h1>Lemon Detector</h1>
+
+<div id="status" class="starting">
+    STARTING...
+</div>
+
+<img id="frame" src="/frame.jpg">
+
+<div id="velocity"></div>
+
+<div id="commentary">
+    Waiting for lemon...
+</div>
+
+
+<script>
+
+async function poll() {
+
+    try {
+
+        const response = await fetch("/status");
+
+        const data = await response.json();
+
+
+        const statusElement =
+            document.getElementById("status");
+
+
+        statusElement.className =
+            data.state;
+
+
+        const labels = {
+
+            stable:
+                "Lemon DETECTED - STABLE",
+
+            moving:
+                "Lemon MOVING - WATCHING",
+
+            verifying:
+                "VERIFYING WITH GEMMA...",
+
+            eliminated:
+                "Lemon HAS FALLEN!",
+
+            starting:
+                "STARTING..."
+
+        };
+
+
+        statusElement.textContent =
+
+            labels[data.state]
+
+            ||
+
+            data.state;
+
+
+        document.getElementById("velocity").textContent =
+
+            "Downward velocity: "
+
+            +
+
+            Math.round(data.velocity)
+
+            +
+
+            " px/s";
+
+
+        document.getElementById("commentary").textContent =
+
+            data.commentary
+
+            ?
+
+            '"' + data.commentary + '"'
+
+            :
+
+            "";
+
+
+    }
+
+    catch(error) {
+
+        console.log(error);
+
+    }
+
+}
+
+
+setInterval(poll, 300);
+
+
+setInterval(() => {
+
+    document.getElementById("frame").src =
+
+        "/frame.jpg?t=" + Date.now();
+
+}, 150);
+
+
+poll();
+
+</script>
+
+</body>
+
+</html>
+"""
+
+
+# ============================================================
+# WEB ROUTES
+# ============================================================
+
+@app.route("/")
+def index():
+
+    return PAGE_HTML
+
+
+@app.route("/status")
+def status():
+
+    with web_lock:
+
+        return jsonify(latest_status)
+
+
+@app.route("/frame.jpg")
+def frame():
+
+    with web_lock:
+
+        data = latest_jpeg
+
+
+    if data is None:
+
+        return "", 404
+
+
+    return Response(
+        data,
+        mimetype="image/jpeg"
+    )
+
+
+def run_web_server():
+
+    app.run(
+        host=WEB_HOST,
+        port=WEB_PORT,
+        threaded=True,
+        debug=False,
+        use_reloader=False
+    )
+
+
+# ============================================================
+# MAIN PROGRAM
+# ============================================================
+
+def main():
+
+    global fall_detected
+    global fall_time
+
+    global verifying
+    global verify_result
+
+    global smoothed_y
+
+    global latest_jpeg
+
+    global gemma_commentary
+
+    global last_seen_time
+
+    global ball_seen_before
+
+
+    print("=" * 60)
+
+    print("STARTING LEMON DETECTOR")
+
+    print("=" * 60)
+
+
+    # Start ESP32-CAM
+
+    grabber = FrameGrabber(
+        ESP32_CAM_URL
+    )
+
+
+    print("Waiting for ESP32-CAM...")
+
+
+    while grabber.get_frame() is None:
+
+        time.sleep(0.05)
+
+
+    print("ESP32-CAM CONNECTED!")
+
+
+    # Start website
+
+    threading.Thread(
+        target=run_web_server,
+        daemon=True
+    ).start()
+
+
+    print(
+        f"Website: http://localhost:{WEB_PORT}"
+    )
+
+
+    fps_counter = 0
+    fps_timer = time.time()
+    fps_display = 0
+
+
+    try:
+
+        while True:
+
+
+            raw_frame = grabber.get_frame()
+
+
+            if raw_frame is None:
+
                 continue
-            perimeter = cv2.arcLength(c, True)
-            if perimeter == 0:
-                continue
-            circularity = 4 * np.pi * area / (perimeter ** 2)
-            if circularity < MIN_CIRCULARITY:
-                continue
-            if area > best_area:
-                best_area = area
-                best_contour = c
 
-        cv2.line(im, (0, FALL_LINE), (width, FALL_LINE), (255, 0, 0), 2)
 
-        # --------------------------
-        # Handle a resolved Gemma verification
-        # --------------------------
+            now = time.time()
 
-        if verifying and verify_result is not None:
-            if verify_result:
-                print("")
-                print("==============================")
-                print("   PLAYER HAS BEEN ELIMINATED")
-                print("==============================")
-                print("")
-                fall_detected = True
-                fall_time = now
+
+            # ================================================
+            # RESIZE FRAME
+            # ================================================
+
+            if PROCESS_WIDTH is not None:
+
+
+                scale = (
+                    PROCESS_WIDTH
+                    /
+                    raw_frame.shape[1]
+                )
+
+
+                im = cv2.resize(
+
+                    raw_frame,
+
+                    (
+                        PROCESS_WIDTH,
+
+                        int(
+                            raw_frame.shape[0]
+                            *
+                            scale
+                        )
+                    )
+
+                )
+
+
             else:
-                print("Gemma says no fall - resuming tracking.")
-                fall_detected = False
 
-            verifying = False
-            verify_result = None
-            y_history.clear()
-            smoothed_y = None
+                im = raw_frame.copy()
 
-        # --------------------------
-        # Cooldown after a confirmed fall
-        # --------------------------
 
-        if fall_detected and (now - fall_time) > FALL_COOLDOWN_SECONDS:
-            fall_detected = False
-            y_history.clear()
-            smoothed_y = None
+            height, width = im.shape[:2]
 
-        velocity = 0
 
-        if best_contour is not None:
+            # ================================================
+            # YELLOW BALL DETECTION
+            # ================================================
 
-            x, y, w, h = cv2.boundingRect(best_contour)
-            center_x = int(x + w / 2)
-            center_y = int(y + h / 2)
+            blurred = cv2.GaussianBlur(
+                im,
+                (5, 5),
+                0
+            )
 
-            if smoothed_y is None:
-                smoothed_y = center_y
-            else:
-                smoothed_y = EMA_ALPHA * center_y + (1 - EMA_ALPHA) * smoothed_y
 
-            cv2.rectangle(im, (x, y), (x + w, y + h), (0, 255, 255), 2)
-            cv2.circle(im, (center_x, int(smoothed_y)), 5, (0, 0, 255), -1)
+            hsv = cv2.cvtColor(
+                blurred,
+                cv2.COLOR_BGR2HSV
+            )
 
-            if not fall_detected and not verifying:
-                y_history.append((now, smoothed_y))
 
-            while y_history and (now - y_history[0][0]) > HISTORY_WINDOW_SECONDS:
-                y_history.popleft()
+            mask = cv2.inRange(
+                hsv,
+                LOWER_YELLOW,
+                UPPER_YELLOW
+            )
 
-            if len(y_history) >= 2:
-                t_old, y_old = y_history[0]
-                t_new, y_new = y_history[-1]
-                dt = t_new - t_old
-                if dt > 0:
-                    velocity = (y_new - y_old) / dt
 
-                # --------------------------
-                # Suspected fall -> hand off to Gemma
-                # --------------------------
+            # Remove noise
+
+            mask = cv2.erode(
+                mask,
+                None,
+                iterations=1
+            )
+
+
+            mask = cv2.dilate(
+                mask,
+                None,
+                iterations=2
+            )
+
+
+            contours, _ = cv2.findContours(
+
+                mask,
+
+                cv2.RETR_EXTERNAL,
+
+                cv2.CHAIN_APPROX_SIMPLE
+
+            )
+
+
+            best_contour = None
+
+            best_area = 0
+
+
+            # ================================================
+            # FIND BEST CIRCULAR YELLOW OBJECT
+            # ================================================
+
+            for contour in contours:
+
+
+                area = cv2.contourArea(
+                    contour
+                )
+
 
                 if (
-                    velocity > FALL_VELOCITY_THRESHOLD
-                    and smoothed_y >= FALL_LINE
-                    and not fall_detected
-                    and not verifying
+                    area < MIN_CONTOUR_AREA
+                    or
+                    area > MAX_CONTOUR_AREA
                 ):
-                    print(f"Suspected fall (velocity: {velocity:.0f}px/s) - asking Gemma to verify...")
-                    verifying = True
-                    verify_result = None
-                    # Verify against the full-resolution raw frame,
-                    # not the downscaled tracking frame, so Gemma
-                    # gets the clearest possible image.
-                    threading.Thread(
-                        target=verify_with_gemma,
-                        args=(raw_frame.copy(),),
-                        daemon=True
-                    ).start()
 
-            # --------------------------
-            # Status display
-            # --------------------------
+                    continue
 
-            if fall_detected:
-                cv2.putText(im, "PLAYER ELIMINATED", (10, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-            elif verifying:
-                cv2.putText(im, "VERIFYING WITH GEMMA...", (10, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2)
-            elif velocity > 50:
-                cv2.putText(im, f"MOVING DOWN {velocity:.0f}px/s", (10, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+                perimeter = cv2.arcLength(
+                    contour,
+                    True
+                )
+
+
+                if perimeter == 0:
+
+                    continue
+
+
+                circularity = (
+
+                    4
+                    *
+                    np.pi
+                    *
+                    area
+
+                    /
+
+                    (
+                        perimeter
+                        **
+                        2
+                    )
+
+                )
+
+
+                # Ignore objects that are not ball-like
+
+                if circularity < MIN_CIRCULARITY:
+
+                    continue
+
+
+                if area > best_area:
+
+
+                    best_area = area
+
+                    best_contour = contour
+
+
+            # ================================================
+            # DRAW FALL LINE
+            # ================================================
+
+            cv2.line(
+
+                im,
+
+                (0, FALL_LINE),
+
+                (width, FALL_LINE),
+
+                (255, 0, 0),
+
+                2
+
+            )
+
+
+            cv2.putText(
+
+                im,
+
+                "FALL LINE",
+
+                (10, FALL_LINE - 10),
+
+                cv2.FONT_HERSHEY_SIMPLEX,
+
+                0.5,
+
+                (255, 0, 0),
+
+                2
+
+            )
+
+
+            # ================================================
+            # GET GEMMA RESULT
+            # ================================================
+
+            if (
+
+                verifying
+
+                and
+
+                verify_result is not None
+
+            ):
+
+
+                if verify_result:
+
+
+                    print()
+                    print("=" * 50)
+                    print("LEMON FALL CONFIRMED!")
+                    print("=" * 50)
+                    print()
+
+
+                    fall_detected = True
+
+                    fall_time = now
+
+
+                else:
+
+
+                    print(
+                        "Gemma rejected the fall."
+                    )
+
+
+                    fall_detected = False
+
+
+                verifying = False
+
+                verify_result = None
+
+                y_history.clear()
+
+                smoothed_y = None
+
+
+            # ================================================
+            # RESET AFTER COOLDOWN
+            # ================================================
+
+            if (
+
+                fall_detected
+
+                and
+
+                (
+                    now - fall_time
+                )
+
+                >
+                FALL_COOLDOWN_SECONDS
+
+            ):
+
+
+                fall_detected = False
+
+                y_history.clear()
+
+                smoothed_y = None
+
+
+            velocity = 0
+
+            state = "stable"
+
+
+            # ================================================
+            # BALL DETECTED
+            # ================================================
+
+            if best_contour is not None:
+
+
+                last_seen_time = now
+
+                ball_seen_before = True
+
+
+                x, y, w, h = cv2.boundingRect(
+                    best_contour
+                )
+
+
+                center_x = int(
+                    x + w / 2
+                )
+
+
+                center_y = int(
+                    y + h / 2
+                )
+
+
+                # ============================================
+                # SMOOTH BALL POSITION
+                # ============================================
+
+                if smoothed_y is None:
+
+
+                    smoothed_y = center_y
+
+
+                else:
+
+
+                    smoothed_y = (
+
+                        EMA_ALPHA
+                        *
+                        center_y
+
+                        +
+
+                        (
+                            1 - EMA_ALPHA
+                        )
+                        *
+                        smoothed_y
+
+                    )
+
+
+                # ============================================
+                # DRAW BALL BOX
+                # ============================================
+
+                cv2.rectangle(
+
+                    im,
+
+                    (x, y),
+
+                    (x + w, y + h),
+
+                    (0, 255, 255),
+
+                    2
+
+                )
+
+
+                cv2.circle(
+
+                    im,
+
+                    (
+                        center_x,
+                        int(smoothed_y)
+                    ),
+
+                    6,
+
+                    (0, 0, 255),
+
+                    -1
+
+                )
+
+
+                cv2.putText(
+
+                    im,
+
+                    "LEMON",
+
+                    (
+                        x,
+                        max(
+                            y - 10,
+                            20
+                        )
+                    ),
+
+                    cv2.FONT_HERSHEY_SIMPLEX,
+
+                    0.6,
+
+                    (0, 255, 255),
+
+                    2
+
+                )
+
+
+                # ============================================
+                # STORE POSITION HISTORY
+                # ============================================
+
+                if (
+
+                    not fall_detected
+
+                    and
+
+                    not verifying
+
+                ):
+
+
+                    y_history.append(
+
+                        (
+                            now,
+                            smoothed_y
+                        )
+
+                    )
+
+
+                # Remove old history
+
+                while (
+
+                    y_history
+
+                    and
+
+                    (
+                        now
+                        -
+                        y_history[0][0]
+                    )
+
+                    >
+                    HISTORY_WINDOW_SECONDS
+
+                ):
+
+
+                    y_history.popleft()
+
+
+                # ============================================
+                # CALCULATE VELOCITY
+                # ============================================
+
+                if len(y_history) >= 2:
+
+
+                    t_old, y_old = (
+                        y_history[0]
+                    )
+
+
+                    t_new, y_new = (
+                        y_history[-1]
+                    )
+
+
+                    dt = t_new - t_old
+
+
+                    if dt > 0:
+
+
+                        velocity = (
+                            y_new - y_old
+                        ) / dt
+
+
+                    # ========================================
+                    # SUSPECT BALL FALL
+                    # ========================================
+
+                    if (
+
+                        velocity
+                        >
+                        FALL_VELOCITY_THRESHOLD
+
+                        and
+
+                        smoothed_y
+                        >=
+                        FALL_LINE
+
+                        and
+
+                        not fall_detected
+
+                        and
+
+                        not verifying
+
+                    ):
+
+
+                        print(
+
+                            f"Suspected ball fall: "
+
+                            f"{velocity:.0f} px/s"
+
+                        )
+
+
+                        verifying = True
+
+                        verify_result = None
+
+                        gemma_commentary = ""
+
+
+                        threading.Thread(
+
+                            target=verify_with_gemma,
+
+                            args=(
+                                raw_frame.copy(),
+                            ),
+
+                            daemon=True
+
+                        ).start()
+
+
+                # ============================================
+                # DISPLAY STATE
+                # ============================================
+
+                if fall_detected:
+
+
+                    state = "eliminated"
+
+
+                    cv2.putText(
+
+                        im,
+
+                        "LEMON HAS FALLEN!",
+
+                        (10, 40),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.9,
+
+                        (0, 0, 255),
+
+                        3
+
+                    )
+
+
+                elif verifying:
+
+
+                    state = "verifying"
+
+
+                    cv2.putText(
+
+                        im,
+
+                        "VERIFYING WITH GEMMA...",
+
+                        (10, 40),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.7,
+
+                        (0, 165, 255),
+
+                        2
+
+                    )
+
+
+                elif velocity > 50:
+
+
+                    state = "moving"
+
+
+                    cv2.putText(
+
+                        im,
+
+                        f"LEMON MOVING {velocity:.0f} px/s",
+
+                        (10, 40),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.7,
+
+                        (0, 255, 255),
+
+                        2
+
+                    )
+
+
+                else:
+
+
+                    state = "stable"
+
+
+                    cv2.putText(
+
+                        im,
+
+                        "LEMON STABLE",
+
+                        (10, 40),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.7,
+
+                        (0, 255, 0),
+
+                        2
+
+                    )
+
+
+            # ================================================
+            # NO BALL DETECTED
+            # ================================================
+
             else:
-                cv2.putText(im, "OBJECT STABLE", (10, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        else:
-            cv2.putText(im, "NO YELLOW OBJECT DETECTED", (10, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # --------------------------
-        # FPS counter
-        # --------------------------
+                if fall_detected:
 
-        fps_counter += 1
-        if now - fps_timer >= 1.0:
-            fps_display = fps_counter
-            fps_counter = 0
-            fps_timer = now
 
-        cv2.putText(im, f"FPS: {fps_display}", (width - 90, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                    state = "eliminated"
 
-        cv2.imshow("Yellow Object Fall Detection", im)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+                    cv2.putText(
 
-finally:
-    grabber.stop()
-    cv2.destroyAllWindows()
+                        im,
+
+                        "LEMON HAS FALLEN!",
+                        (10, 40),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.9,
+
+                        (0, 0, 255),
+
+                        3
+
+                    )
+
+
+                elif (
+
+                    ball_seen_before
+
+                    and
+
+                    not verifying
+
+                    and
+
+                    (
+                        now
+                        -
+                        last_seen_time
+                    )
+
+                    >
+                    OUT_OF_FRAME_GRACE_SECONDS
+
+                ):
+
+
+                    print()
+                    print("=" * 50)
+                    print(
+                        "LEMON Fell Down"
+                    )
+                    print("=" * 50)
+                    print()
+
+
+                    fall_detected = True
+
+                    fall_time = now
+
+
+                    gemma_commentary = (
+                        "Lemon disappeared from the camera frame."
+                    )
+
+
+                    ball_seen_before = False
+
+                    y_history.clear()
+
+                    smoothed_y = None
+
+
+                    state = "eliminated"
+
+
+                    cv2.putText(
+
+                        im,
+
+                        "LEMON HAS FALLEN!",
+
+                        (10, 40),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.9,
+
+                        (0, 0, 255),
+
+                        3
+
+                    )
+
+
+                else:
+
+
+                    state = "stable"
+
+
+                    cv2.putText(
+
+                        im,
+
+                        "LEMON NOT DETECTED",
+
+                        (10, 40),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.7,
+
+                        (0, 0, 255),
+
+                        2
+
+                    )
+
+
+            # ================================================
+            # FPS
+            # ================================================
+
+            fps_counter += 1
+
+
+            if now - fps_timer >= 1:
+
+
+                fps_display = fps_counter
+
+                fps_counter = 0
+
+                fps_timer = now
+
+
+            cv2.putText(
+
+                im,
+
+                f"FPS: {fps_display}",
+
+                (width - 90, 25),
+
+                cv2.FONT_HERSHEY_SIMPLEX,
+
+                0.5,
+
+                (200, 200, 200),
+
+                1
+
+            )
+
+
+            # ================================================
+            # SEND FRAME TO WEBSITE
+            # ================================================
+
+            ok, jpeg_buffer = cv2.imencode(
+                ".jpg",
+                im
+            )
+
+
+            if ok:
+
+
+                with web_lock:
+
+
+                    latest_jpeg = (
+                        jpeg_buffer.tobytes()
+                    )
+
+
+                    latest_status["state"] = state
+
+
+                    latest_status["velocity"] = velocity
+
+
+                    latest_status["commentary"] = (
+                        gemma_commentary
+                    )
+
+
+                    latest_status["updated_at"] = now
+
+
+            # ================================================
+            # SHOW OPENCV WINDOW
+            # ================================================
+
+            cv2.imshow(
+                "Lemon Detector",
+                im
+            )
+
+
+            # Press Q to quit
+
+            if (
+                cv2.waitKey(1)
+                &
+                0xFF
+                ==
+                ord("q")
+            ):
+
+                break
+
+
+    finally:
+
+
+        print("Stopping...")
+
+
+        grabber.stop()
+
+
+        cv2.destroyAllWindows()
+
+
+# ============================================================
+# START PROGRAM
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
