@@ -1,108 +1,233 @@
 # Onakali Referee
 
-A playful but powerful AI-powered officiating system for traditional Onam games, designed to bring precision, energy, and fairness to local sports events.
+An AI-powered officiating system for traditional Onam games, combining embedded hardware, computer vision, real-time rule evaluation, and local AI to make games more measurable, interactive, and fair.
 
-Onakali Referee combines physical sensing, real-time rule evaluation, and local AI commentary to turn classic games into a data-driven, interactive experience. From tug-of-war tension to musical-chair chaos, the platform captures motion, detects winners, and narrates the action using an on-device language model.
+Onakali Referee currently focuses on two game modes: **Kamba Vali (Tug of War)** and **Lemon & Spoon**. The system combines ESP32-based sensing with an ESP32-CAM, Python-based game logic, OpenCV computer vision, and a locally running Gemma 3 4B model through Ollama.
 
 ---
 
 ## Why this project matters
 
-Traditional sports often rely on human observation, which can be subjective, slow, and inconsistent—especially during fast mechanical events. Onakali Referee addresses that gap by turning the game into a measurable system:
+Traditional games often rely entirely on human observation. During fast-paced events, this can make judging difficult, subjective, or inconsistent.
 
-- sensor-based event detection
-- automated rule evaluation
-- instant winner confirmation
-- fast, local AI-generated commentary
-- physical feedback through connected hardware
+Onakali Referee addresses this by converting physical events into measurable data:
 
-The result is a compact, offline-first referee assistant that feels both practical and engaging for events, demos, and educational showcases.
+* sensor-based event detection
+* camera-based object and motion detection
+* automated rule evaluation
+* real-time event detection
+* local AI verification and commentary
+* physical feedback through connected hardware
+
+The system is designed to work locally, making it suitable for demonstrations and environments where an internet connection is not required.
 
 ---
 
 ## What the system does
 
-This project is designed to monitor, judge, and explain a game in real time. The hardware collects motion and environment data, the backend evaluates game logic, and the AI layer converts raw results into commentary that feels lively and human.
+Onakali Referee combines three main layers:
 
-At a high level, the flow is:
+1. **Embedded sensing** — ESP32 hardware collects physical events using sensors.
+2. **Computer vision and rule processing** — Python processes camera frames and sensor data to determine game events.
+3. **Local AI** — Gemma 3 4B running through Ollama provides additional visual verification and referee commentary.
 
-1. Hardware sensors capture motion and conditions.
-2. The backend receives streamed telemetry.
-3. Game logic decides whether a rule was broken or a player won.
-4. Physical outputs trigger actuation such as flags, relays, or speaker control.
-5. Local AI produces a match recap or live referee summary.
+The general workflow is:
+
+```text
+Physical Game
+     │
+     ├── ESP32 + Sensors
+     │
+     └── ESP32-CAM
+             │
+             ▼
+       Python Backend
+             │
+       ┌─────┴─────┐
+       │           │
+   Game Rules   Computer Vision
+       │           │
+       └─────┬─────┘
+             ▼
+       Event Detection
+             │
+             ▼
+       Gemma 3 4B
+       via Ollama
+             │
+             ▼
+     Referee Decision
+             │
+             ▼
+      Streamlit Dashboard
+```
 
 ---
 
 ## Key features
 
-- Multi-game judging engine for traditional Onam-style competitions
-- Real-time telemetry from ESP32-based sensor systems
-- Offline AI commentary using a local Ollama model
-- Live monitoring dashboard for event control and match insights
-- Physical actuator support for winner announcement and event feedback
-- Modular architecture that can expand to more games and rules
+* Multi-game judging framework for traditional Onam competitions
+* Real-time telemetry from ESP32-based hardware
+* ESP32-CAM based visual monitoring
+* OpenCV-based object and motion detection
+* Local AI verification using Ollama and Gemma 3 4B
+* Automated game-event detection
+* Live monitoring dashboard
+* Physical actuator support
+* Offline-first architecture
+* Modular game-engine structure
 
-### Included game modes
+---
 
-- Kamba Vali (Tug of War)
-  - Measures force and rope motion through IMU and IR-based detection
-  - Detects directional pull and crossing conditions
+## Included game modes
 
-- Lemon & Spoon
-  - Tracks motion spikes and finish-line timing
-  - Identifies drops and completion events
+### Kamba Vali — Tug of War
 
-- Musical Chairs
-  - Uses sensor timing to evaluate reaction and elimination behavior
-  - Supports quick, precise event detection in rapid-play scenarios
+Kamba Vali uses ESP32-based sensing to monitor physical movement and determine game events.
+
+The system can use:
+
+* IR-based detection
+* IMU-based motion sensing
+* directional movement
+* crossing conditions
+* sensor telemetry
+
+The collected data is processed by the Python game engine to determine the state of the match.
+
+### Lemon & Spoon
+
+Lemon & Spoon uses an **ESP32-CAM** to provide a live camera feed to the Python computer-vision system.
+
+The current detection pipeline works as follows:
+
+```text
+ESP32-CAM
+    │
+    │ JPEG frames over Wi-Fi
+    ▼
+Python
+    │
+    ▼
+OpenCV
+    │
+    ├── HSV color filtering
+    ├── Yellow-object detection
+    ├── Contour detection
+    ├── Shape filtering
+    └── Center-point tracking
+    │
+    ▼
+Motion Analysis
+    │
+    ├── Position
+    ├── Direction
+    └── Downward velocity
+    │
+    ▼
+Possible Fall
+    │
+    ▼
+Gemma 3 4B
+    │
+    ▼
+Visual verification
+```
+
+The computer-vision system identifies the detected object's center and tracks its movement between frames. A rapid downward movement combined with the configured fall conditions can trigger a suspected fall.
+
+Gemma 3 4B can then be used as an additional verification layer rather than relying solely on motion detection.
+
+The current implementation does not require a custom-trained lemon model. The initial vision stage uses color, contour, shape, and motion information.
 
 ---
 
 ## System architecture
 
 ```text
-┌──────────────────────────────┐
-│        Physical Hardware     │
-│ ESP32 + Sensors + Relays     │
-│ MPU6050, IR, Ultrasonic, etc │
-└──────────────┬───────────────┘
-               │
-               │ sensor data / serial stream
-               ▼
-┌──────────────────────────────┐
-│      Python Game Backend     │
-│ Rule engine + telemetry flow │
-│ + match state management     │
-└──────────────┬───────────────┘
-               │
-               │ local API / control layer
-               ▼
-┌──────────────────────────────┐
-│     Local AI Commentary      │
-│ Ollama + Gemma 2B (offline)  │
-└──────────────┬───────────────┘
-               │
-               │ match recap & live narration
-               ▼
-┌──────────────────────────────┐
-│   Live Control Dashboard     │
-│  Streamlit / event UI        │
-└──────────────────────────────┘
+┌─────────────────────────────────┐
+│       Physical Hardware         │
+│                                 │
+│ ESP32 + Sensors                 │
+│ IR  / GPIO                      │
+│                                 │
+│ ESP32-CAM                       │
+│ Camera-based monitoring         │
+└───────────────┬─────────────────┘
+                │
+                │ Serial / Wi-Fi
+                ▼
+┌─────────────────────────────────┐
+│        Python Backend           │
+│                                 │
+│ Telemetry                       │
+│ Game Engine                     │
+│ Rule Evaluation                 │
+│ Match State                     │
+└───────────────┬─────────────────┘
+                │
+                ├──────────────────┐
+                │                  │
+                ▼                  ▼
+┌────────────────────────┐  ┌────────────────────────┐
+│   Computer Vision      │  │     Local AI           │
+│                        │  │                        │
+│ OpenCV                 │  │ Ollama                 │
+│ Object Detection       │  │ Gemma 3 4B             │
+│ Motion Tracking        │  │ Visual Verification    │
+│ Fall Detection         │  │ Referee Commentary     │
+└────────────┬───────────┘  └────────────┬───────────┘
+             │                           │
+             └─────────────┬─────────────┘
+                           ▼
+                ┌────────────────────────┐
+                │   Streamlit Dashboard  │
+                │                        │
+                │ Live Game Status       │
+                │ Detection Results      │
+                │ Match Information      │
+                │ AI Commentary          │
+                └────────────────────────┘
 ```
 
 ---
 
 ## Tech stack
 
-- Embedded hardware: ESP32
-- Sensors: IMU, IR, ultrasonic, relay, servo, GPIO-based input/output
-- Backend: Python
-- Visualization/control: Streamlit
-- Local AI: Ollama with Gemma 2B
-- Communication: serial telemetry and local API integration
+### Hardware
 
-This combination keeps the system lightweight, interactive, and suitable for offline demonstrations.
+* ESP32
+* ESP32-CAM
+* IR sensors
+* Servo / actuator components
+* GPIO-based inputs and outputs
+
+### Software
+
+* Python
+* OpenCV
+* NumPy
+* Flask
+* Streamlit
+* Ollama
+* Gemma 3 4B
+
+### Computer vision
+
+* OpenCV
+* HSV color segmentation
+* Contour detection
+* Shape filtering
+* Object center tracking
+* Motion and velocity analysis
+
+### AI
+
+* Ollama
+* Gemma 3 4B
+* Local/offline inference
+
+This architecture keeps the core processing local and avoids requiring an external cloud AI service.
 
 ---
 
@@ -123,8 +248,7 @@ onamhackathon/
 │       ├── __init__.py
 │       ├── base_game.py
 │       ├── kamba_vali.py
-│       ├── lemon_spoon.py
-│       └── musical_chairs.py
+│       └── lemon_spoon.py
 ├── firmware/
 │   └── onakali_firmware.ino
 └── .gitignore
@@ -136,73 +260,178 @@ onamhackathon/
 
 ### Prerequisites
 
-- Python environment for the backend
-- ESP32 development setup for firmware flashing
-- Ollama installed for local model inference
-- A compatible local machine for running the UI and backend together
+* Python 3.11
+* ESP32 development environment
+* ESP32-CAM
+* Ollama
+* A local computer capable of running Python, OpenCV, and Gemma 3 4B
+* Required sensors and actuators for the selected game
 
-### 1. Set up the local model
+### 1. Install the Python dependencies
 
-Install Ollama and pull the model used for match narration and commentary.
-
-```bash
-ollama pull gemma2:2b
-```
-
-### 2. Prepare the Python environment
-
-Create a virtual environment and install the project dependencies from the repository requirements file.
+Create a virtual environment:
 
 ```bash
 python -m venv .venv
+```
+
+Activate it:
+
+Linux/macOS:
+
+```bash
 source .venv/bin/activate
+```
+
+Windows:
+
+```powershell
+.venv\Scripts\activate
+```
+
+Install the dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. Run the backend and dashboard
+### 2. Set up Ollama
 
-Use the Python backend and dashboard components inside the backend folder to start the live judging flow and Web UI.
+Install Ollama and download the local Gemma model:
 
-### 4. Flash the firmware
+```bash
+ollama pull gemma3:4b
+```
 
-Program the ESP32 with the firmware in the firmware directory and connect the required sensors and actuators.
+Verify that it is available:
+
+```bash
+ollama list
+```
+
+You should see:
+
+```text
+gemma3:4b
+```
+
+### 3. Configure the ESP32-CAM
+
+Flash the ESP32-CAM firmware and connect it to the same local network as the computer running the Python vision system.
+
+The ESP32-CAM provides JPEG frames through its local HTTP camera endpoint.
+
+### 4. Configure the Python backend
+
+Configure the appropriate ESP32-CAM address and hardware communication settings in the backend.
+
+The Python system receives camera frames, processes sensor telemetry, evaluates game rules, and communicates with the local AI layer.
+
+### 5. Start the application
+
+Start the backend and Streamlit dashboard using the project's configured entry points.
+
+---
+
+## Lemon & Spoon detection pipeline
+
+The Lemon & Spoon system does not currently require a trained lemon-detection model.
+
+The initial vision system uses OpenCV:
+
+```text
+Camera Frame
+     │
+     ▼
+Resize / Preprocessing
+     │
+     ▼
+BGR → HSV
+     │
+     ▼
+Yellow Color Mask
+     │
+     ▼
+Morphological Filtering
+     │
+     ▼
+Contour Detection
+     │
+     ▼
+Area + Shape Filtering
+     │
+     ▼
+Object Center
+     │
+     ▼
+Position Tracking
+     │
+     ▼
+Downward Motion / Velocity
+     │
+     ▼
+Possible Fall
+     │
+     ▼
+Gemma 3 4B Verification
+```
+
+This approach allows the system to be developed and tested before a custom lemon dataset is available.
+
+A custom-trained object-detection model can be added later if greater lemon-specific detection accuracy is required.
 
 ---
 
 ## Typical workflow
 
-1. Connect the ESP32 hardware and sensors.
-2. Start the backend telemetry service.
-3. Launch the game dashboard.
-4. Begin a match and monitor live readings.
-5. Let the rules engine determine the winner.
-6. Generate AI commentary for the outcome.
-7. Trigger the physical announcement or actuation sequence.
+1. Connect the ESP32 hardware and required sensors.
+2. Connect the ESP32-CAM for Lemon & Spoon.
+3. Start Ollama with the `gemma3:4b` model available locally.
+4. Start the Python backend.
+5. Launch the Streamlit dashboard.
+6. Begin a match.
+7. Monitor sensor telemetry and camera detections.
+8. Let the game engine evaluate the relevant rules.
+9. Use computer vision to detect visual events such as object movement or drops.
+10. Use Gemma 3 4B for AI-based verification and referee commentary.
+11. Display the result through the dashboard.
+12. Trigger connected physical outputs when required.
 
 ---
 
 ## Why it stands out
 
-Onakali Referee blends the energy of traditional games with the precision of modern embedded systems and local AI. Instead of merely measuring a sport, it makes the sport feel alive: it reacts, records, judges, and tells the story.
+Onakali Referee combines traditional games with embedded systems, computer vision, and local AI.
 
-That combination makes it especially compelling for:
+Instead of relying entirely on human observation, the system creates a measurable digital representation of game events.
 
-- hackathons and prototype demos
-- cultural event technology showcases
-- educational robotics and AI projects
-- local sports digitization experiments
+It combines:
+
+* physical sensing
+* computer vision
+* real-time rule evaluation
+* local AI
+* hardware control
+* live visualization
+
+The offline-first design also makes it suitable for demonstrations where reliable internet connectivity is not guaranteed.
 
 ---
 
 ## Future possibilities
 
-This project is a strong foundation for a broader sports-tech platform. Potential next steps include:
+Potential future improvements include:
 
-- more game rules and event types
-- richer leaderboards and match history
-- improved visual analytics for sensor streams
-- support for more microcontrollers or wireless modules
-- multilingual referee summaries
+* custom-trained lemon detection
+* more robust object tracking
+* improved fall prediction
+* automatic calibration of camera zones
+* additional traditional games
+* richer match history and leaderboards
+* improved visual analytics
+* multilingual referee commentary
+* wireless communication between multiple ESP32 devices
+* automatic event replay and analysis
 
 ---
 
@@ -210,10 +439,11 @@ This project is a strong foundation for a broader sports-tech platform. Potentia
 
 This project is currently shared as a prototype and can be adapted for educational, experimental, or local event use.
 
-> For a final version, add the exact license you intend to publish under, such as MIT or Apache 2.0.
 
 ---
 
 ## Summary
 
-Onakali Referee is more than a hardware demo—it is a complete concept for bringing fairness, intelligence, and excitement to traditional games using modern sensing and AI. It shows how local computing, embedded systems, and language models can combine to create a memorable event experience.
+Onakali Referee is a prototype platform for bringing modern sensing, computer vision, embedded systems, and local AI to traditional Onam games.
+
+By combining ESP32 hardware, ESP32-CAM visual monitoring, Python-based rule evaluation, OpenCV, and Gemma 3 4B through Ollama, the system can observe game events, evaluate them, verify important decisions, and present the results through a live referee dashboard.
